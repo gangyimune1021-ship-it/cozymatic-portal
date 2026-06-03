@@ -3,7 +3,7 @@
  * Uses the Manus v2 API to create tasks and poll for results.
  */
 
-const MANUS_API_BASE = 'https://api.manus.im/api/v2'
+const MANUS_API_BASE = 'https://api.manus.ai/v2'
 const MANUS_API_KEY = 'sk-2zOWUnvUvnXYBmIOydc61CyyqXbpykiDx2GzX9-nMOay6IUAFQR6GB3LhjIIOG1Ng3Wjr6G8VbUVaTCKgjyAyLfPmQN_'
 
 export type ManusTaskStatus = 'running' | 'waiting' | 'stopped' | 'error'
@@ -20,7 +20,7 @@ export interface ManusTaskResult {
 function headers() {
   return {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${MANUS_API_KEY}`,
+    'x-manus-api-key': MANUS_API_KEY,
   }
 }
 
@@ -61,10 +61,10 @@ Images 5-8: White background product shots — clean white background, professio
 
 Save all 8 images with clear filenames: scene_1.jpg, scene_2.jpg, scene_3.jpg, scene_4.jpg, white_1.jpg, white_2.jpg, white_3.jpg, white_4.jpg`
 
-  const res = await fetch(`${MANUS_API_BASE}/tasks`, {
+  const res = await fetch(`${MANUS_API_BASE}/task.create`, {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ message: { text: prompt } }),
   })
 
   if (!res.ok) {
@@ -73,6 +73,7 @@ Save all 8 images with clear filenames: scene_1.jpg, scene_2.jpg, scene_3.jpg, s
   }
 
   const data = await res.json()
+  if (!data.ok) throw new Error(data.error?.message || 'Failed to create task')
   return data.task_id || data.id || data.taskId
 }
 
@@ -80,7 +81,7 @@ Save all 8 images with clear filenames: scene_1.jpg, scene_2.jpg, scene_3.jpg, s
  * Poll a Manus task for its current status and any generated images.
  */
 export async function pollManusTask(taskId: string): Promise<ManusTaskResult> {
-  const res = await fetch(`${MANUS_API_BASE}/tasks/${taskId}`, {
+  const res = await fetch(`${MANUS_API_BASE}/task.listMessages?task_id=${taskId}&order=desc&limit=20`, {
     headers: headers(),
   })
 
@@ -89,34 +90,50 @@ export async function pollManusTask(taskId: string): Promise<ManusTaskResult> {
   }
 
   const data = await res.json()
+  if (!data.ok) throw new Error(data.error?.message || `Poll error ${res.status}`)
 
-  // Extract agent status
-  const agentStatus: ManusTaskStatus = data.agent_status || data.agentStatus || data.status || 'running'
+  // Find the latest status_update event
+  const messages: Array<Record<string, unknown>> = data.messages || []
+  let agentStatus: ManusTaskStatus = 'running'
+  let waitingEventId: string | undefined
+  let waitingEventType: string | undefined
+  let errorMessage: string | undefined
 
-  // Extract waiting event info
-  const waitingEventId = data.waiting_event_id || data.waitingEventId
-  const waitingEventType = data.waiting_event_type || data.waitingEventType
-
-  // Extract image URLs from task output/files
-  const imageUrls: string[] = []
-
-  // Check various possible locations for image URLs
-  const outputs = data.outputs || data.files || data.artifacts || []
-  for (const output of outputs) {
-    const url = output.url || output.file_url || output.download_url
-    if (url && /\.(jpg|jpeg|png|webp|gif)/i.test(url)) {
-      imageUrls.push(url)
+  for (const msg of messages) {
+    if (msg.type === 'status_update') {
+      const su = msg.status_update as Record<string, unknown>
+      agentStatus = (su?.agent_status as ManusTaskStatus) || 'running'
+      if (agentStatus === 'waiting') {
+        const detail = su?.status_detail as Record<string, unknown>
+        waitingEventId = detail?.waiting_for_event_id as string
+        waitingEventType = detail?.waiting_for_event_type as string
+      }
+      if (agentStatus === 'error') {
+        errorMessage = su?.error_message as string
+      }
+      break // desc order, first is latest
     }
   }
 
-  // Also check messages for image attachments
-  const messages = data.messages || []
+  // Extract image URLs from assistant messages and file attachments
+  const imageUrls: string[] = []
   for (const msg of messages) {
-    const attachments = msg.attachments || msg.files || []
+    // Check content array for image_url items
+    const content = (msg.content as Array<Record<string, unknown>>) || []
+    if (Array.isArray(content)) {
+      for (const item of content) {
+        if (item.type === 'image_url') {
+          const imgUrl = (item.image_url as Record<string, unknown>)?.url as string
+          if (imgUrl && !imageUrls.includes(imgUrl)) imageUrls.push(imgUrl)
+        }
+      }
+    }
+    // Check attachments
+    const attachments = (msg.attachments as Array<Record<string, unknown>>) || []
     for (const att of attachments) {
-      const url = att.url || att.file_url
-      if (url && /\.(jpg|jpeg|png|webp|gif)/i.test(url)) {
-        if (!imageUrls.includes(url)) imageUrls.push(url)
+      const url = att.url as string || att.file_url as string
+      if (url && /\.(jpg|jpeg|png|webp|gif)/i.test(url) && !imageUrls.includes(url)) {
+        imageUrls.push(url)
       }
     }
   }
@@ -127,7 +144,7 @@ export async function pollManusTask(taskId: string): Promise<ManusTaskResult> {
     waitingEventId,
     waitingEventType,
     imageUrls,
-    errorMessage: data.error_message || data.errorMessage,
+    errorMessage,
   }
 }
 
@@ -135,9 +152,9 @@ export async function pollManusTask(taskId: string): Promise<ManusTaskResult> {
  * Confirm a waiting Manus action (auto-accept non-critical events).
  */
 export async function confirmManusAction(taskId: string, eventId: string): Promise<void> {
-  await fetch(`${MANUS_API_BASE}/tasks/${taskId}/events/${eventId}/confirm`, {
+  await fetch(`${MANUS_API_BASE}/task.confirmAction`, {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ accept: true }),
+    body: JSON.stringify({ task_id: taskId, event_id: eventId, input: { accept: true } }),
   })
 }
