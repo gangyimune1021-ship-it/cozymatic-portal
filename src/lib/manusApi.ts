@@ -64,7 +64,7 @@ Save all 8 images with clear filenames: scene_1.jpg, scene_2.jpg, scene_3.jpg, s
   const res = await fetch(`${MANUS_API_BASE}/task.create`, {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ message: { text: prompt } }),
+    body: JSON.stringify({ message: { content: [{ type: 'text', text: prompt }] } }),
   })
 
   if (!res.ok) {
